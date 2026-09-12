@@ -72,13 +72,19 @@ def _request_page(
             time.sleep(wait)
             continue
 
-        remaining = int(resp.headers.get("X-RateLimit-Remaining", "1"))
+        try:
+            remaining = int(resp.headers.get("X-RateLimit-Remaining", "1"))
+        except (TypeError, ValueError):
+            remaining = 1
         if resp.status_code in (403, 429) and (remaining == 0 or resp.status_code == 429):
             if attempt >= max_retries:
                 resp.raise_for_status()
             reset_header = resp.headers.get("X-RateLimit-Reset")
             if reset_header and remaining == 0:
-                wait = max(1, int(reset_header) - int(time.time()))
+                try:
+                    wait = max(1, int(reset_header) - int(time.time()))
+                except (TypeError, ValueError):
+                    wait = min(max_backoff_seconds, 2**attempt)
             else:
                 wait = min(max_backoff_seconds, 2**attempt)
             log.warning(

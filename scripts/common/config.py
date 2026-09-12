@@ -59,8 +59,7 @@ def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
                 if loaded:
                     log.debug("Loaded .env from current directory.")
 
-            if loaded:
-                _DOTENV_LOADED_KEYS.add(cache_key)
+            _DOTENV_LOADED_KEYS.add(cache_key)
         except ImportError:
             _DOTENV_UNAVAILABLE = True
             log.debug("python-dotenv not installed; skipping .env loading.")
