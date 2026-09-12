@@ -147,6 +147,8 @@ class ReviewAgent:
             except ValueError:
                 rel = file
             content = safe_read(file)
+            if not content:
+                continue
             if len(content) > MAX_FILE_CHARS:
                 content = content[:MAX_FILE_CHARS] + "\n... [truncated]\n"
             suffix = file.suffix.lower()
