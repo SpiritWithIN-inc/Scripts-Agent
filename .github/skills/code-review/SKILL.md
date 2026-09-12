@@ -1,6 +1,9 @@
-.github/skills/code-review/SKILL.md
-🧠 Code Review Skill
-Skill Name: code-review  
+---
+name: code-review
+description: Provide deep, actionable code reviews across correctness, readability, maintainability, architecture, performance, security, and developer experience.
+---
+
+# 🧠 Code Review Skill
 Type: analysis / quality / safety
 Purpose: Provide deep, actionable code reviews with advanced reasoning, but without requiring any orchestrator or multi-agent system.
 
