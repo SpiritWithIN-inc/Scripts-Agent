@@ -16,13 +16,20 @@ Usage
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from scripts.common.logger import get_logger
 
 log = get_logger(__name__)
 _DOTENV_LOADED_KEYS: set[str] = set()
+_DOTENV_FAILED_MARKERS: dict[str, float | None] = {}
 _DOTENV_UNAVAILABLE = False
+
+
+def _dotenv_marker(dotenv_path: str | None) -> float | None:
+    path = Path(dotenv_path) if dotenv_path else Path(".env")
+    return path.stat().st_mtime if path.exists() else None
 
 
 def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
@@ -44,8 +51,14 @@ def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
     """
     global _DOTENV_UNAVAILABLE
     cache_key = dotenv_path or "__auto__"
+    marker = _dotenv_marker(dotenv_path)
 
-    if cache_key not in _DOTENV_LOADED_KEYS and not _DOTENV_UNAVAILABLE:
+    if cache_key in _DOTENV_LOADED_KEYS:
+        return dict(os.environ)
+    if _DOTENV_FAILED_MARKERS.get(cache_key) == marker:
+        return dict(os.environ)
+
+    if not _DOTENV_UNAVAILABLE:
         try:
             from dotenv import load_dotenv  # type: ignore[import-untyped]
 
@@ -59,7 +72,11 @@ def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
                 if loaded:
                     log.debug("Loaded .env from current directory.")
 
-            _DOTENV_LOADED_KEYS.add(cache_key)
+            if loaded:
+                _DOTENV_LOADED_KEYS.add(cache_key)
+                _DOTENV_FAILED_MARKERS.pop(cache_key, None)
+            else:
+                _DOTENV_FAILED_MARKERS[cache_key] = marker
         except ImportError:
             _DOTENV_UNAVAILABLE = True
             log.debug("python-dotenv not installed; skipping .env loading.")
