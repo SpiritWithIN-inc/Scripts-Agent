@@ -28,7 +28,7 @@ _config_cache_dotenv_path: str | None = None
 def load_config(
     dotenv_path: str | None = None,
     *,
-    use_cache: bool = True,
+    use_cache: bool = False,
 ) -> dict[str, Any]:
     """Load configuration from environment variables.
 

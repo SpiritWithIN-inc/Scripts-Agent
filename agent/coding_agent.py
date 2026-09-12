@@ -168,8 +168,9 @@ def tool_list_files(
             continue
         scanned += 1
         rel = p.relative_to(REPO_ROOT)
+        base_rel = p.relative_to(base)
         rel_str = str(rel)
-        depth = len(rel.parts) - 1
+        depth = len(base_rel.parts) - 1
         if max_depth is not None and depth > max_depth:
             continue
         if include_pattern and not fnmatch.fnmatch(rel.name, include_pattern):

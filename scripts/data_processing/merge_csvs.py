@@ -42,11 +42,10 @@ def _memory_kib() -> tuple[float, float]:
     return current / 1024.0, peak / 1024.0
 
 
-def discover_headers_and_rows(input_paths: list[Path]) -> tuple[list[str], int]:
-    """Return (unified_headers, total_rows) for *input_paths*."""
+def discover_headers(input_paths: list[Path]) -> list[str]:
+    """Return unified normalized headers for *input_paths*."""
     start = time.perf_counter()
     all_headers: list[str] = []
-    total_rows = 0
 
     for path in tqdm(input_paths, desc="Reading CSVs", unit="file"):
         with path.open(encoding="utf-8", newline="") as fh:
@@ -55,9 +54,6 @@ def discover_headers_and_rows(input_paths: list[Path]) -> tuple[list[str], int]:
                 log.warning("Skipping '%s': no headers found.", path)
                 continue
             norm = normalize_header(list(reader.fieldnames))
-            for row in reader:
-                if row:
-                    total_rows += 1
             for h in norm:
                 if h not in all_headers:
                     all_headers.append(h)
@@ -65,15 +61,14 @@ def discover_headers_and_rows(input_paths: list[Path]) -> tuple[list[str], int]:
     elapsed_ms = (time.perf_counter() - start) * 1000
     current_kib, peak_kib = _memory_kib()
     log.info(
-        "perf.discover_headers_and_rows files=%d headers=%d rows=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        "perf.discover_headers files=%d headers=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
         len(input_paths),
         len(all_headers),
-        total_rows,
         elapsed_ms,
         current_kib,
         peak_kib,
     )
-    return all_headers, total_rows
+    return all_headers
 
 
 def iter_merged_rows(input_paths: list[Path]) -> Iterator[dict[str, str]]:
@@ -109,12 +104,24 @@ def main(args: argparse.Namespace) -> int:
         log.error("Files not found: %s", missing)
         return 1
 
-    headers, row_count = discover_headers_and_rows(input_paths)
-    log.info("Merged %d row(s) across %d file(s).", row_count, len(input_paths))
+    headers = discover_headers(input_paths)
+    row_count = 0
 
     # Write merged CSV
     output_path = Path(args.output)
     if args.dry_run:
+        dry_start = time.perf_counter()
+        for _ in tqdm(iter_merged_rows(input_paths), desc="Reading merged rows", unit="row"):
+            row_count += 1
+        elapsed_ms = (time.perf_counter() - dry_start) * 1000
+        current_kib, peak_kib = _memory_kib()
+        log.info(
+            "perf.read_merged_rows rows=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+            row_count,
+            elapsed_ms,
+            current_kib,
+            peak_kib,
+        )
         log.info("[dry-run] Would write merged CSV (%d row(s)) to '%s'.", row_count, output_path)
     else:
         write_start = time.perf_counter()
@@ -122,9 +129,10 @@ def main(args: argparse.Namespace) -> int:
         with output_path.open("w", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=headers, extrasaction="ignore")
             writer.writeheader()
-            with tqdm(total=row_count, desc="Writing merged CSV", unit="row") as bar:
+            with tqdm(desc="Writing merged CSV", unit="row") as bar:
                 for row in iter_merged_rows(input_paths):
                     writer.writerow(row)
+                    row_count += 1
                     bar.update(1)
         log.info("Merged CSV written to '%s'.", output_path)
         elapsed_ms = (time.perf_counter() - write_start) * 1000
@@ -136,6 +144,7 @@ def main(args: argparse.Namespace) -> int:
             current_kib,
             peak_kib,
         )
+    log.info("Merged %d row(s) across %d file(s).", row_count, len(input_paths))
 
     # Write summary report
     summary = build_summary(headers, row_count)
