@@ -176,7 +176,7 @@ def stream_issues_to_csv(
                         items=len(page_items),
                         issues=len(issues),
                     )
-                    if not issues:
+                    if not page_items:
                         break
 
                     for issue in issues:

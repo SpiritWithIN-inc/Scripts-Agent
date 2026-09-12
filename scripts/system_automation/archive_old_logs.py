@@ -56,7 +56,11 @@ def find_old_logs(
                 if not name.lower().endswith(".log"):
                     continue
                 path = Path(root) / name
-                if datetime.fromtimestamp(path.stat().st_mtime) < cutoff:
+                try:
+                    mtime = path.stat().st_mtime
+                except FileNotFoundError:
+                    continue
+                if datetime.fromtimestamp(mtime) < cutoff:
                     yield path
                     yielded += 1
                     if max_files is not None and yielded >= max_files:
