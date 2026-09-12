@@ -21,6 +21,8 @@ from typing import Any
 from scripts.common.logger import get_logger
 
 log = get_logger(__name__)
+_DOTENV_LOADED_KEYS: set[str] = set()
+_DOTENV_UNAVAILABLE = False
 
 
 def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
@@ -40,18 +42,24 @@ def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
     dict
         A snapshot of the current environment variables.
     """
-    try:
-        from dotenv import load_dotenv  # type: ignore[import-untyped]
+    global _DOTENV_UNAVAILABLE
+    cache_key = dotenv_path or "__auto__"
 
-        if dotenv_path:
-            load_dotenv(dotenv_path, override=False)
-            log.debug("Loaded .env from '%s'.", dotenv_path)
-        else:
-            loaded = load_dotenv(override=False)
-            if loaded:
-                log.debug("Loaded .env from current directory.")
-    except ImportError:
-        log.debug("python-dotenv not installed; skipping .env loading.")
+    if cache_key not in _DOTENV_LOADED_KEYS and not _DOTENV_UNAVAILABLE:
+        try:
+            from dotenv import load_dotenv  # type: ignore[import-untyped]
+
+            if dotenv_path:
+                load_dotenv(dotenv_path, override=False)
+                log.debug("Loaded .env from '%s'.", dotenv_path)
+            else:
+                loaded = load_dotenv(override=False)
+                if loaded:
+                    log.debug("Loaded .env from current directory.")
+            _DOTENV_LOADED_KEYS.add(cache_key)
+        except ImportError:
+            _DOTENV_UNAVAILABLE = True
+            log.debug("python-dotenv not installed; skipping .env loading.")
 
     return dict(os.environ)
 

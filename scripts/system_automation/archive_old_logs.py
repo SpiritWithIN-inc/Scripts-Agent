@@ -9,8 +9,11 @@ structured logging, and tqdm progress bars.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import sys
+import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -26,32 +29,71 @@ from scripts.common.logger import get_logger
 log = get_logger(__name__)
 
 
-def find_old_logs(log_dir: Path, days: int) -> list[Path]:
-    """Return log files in *log_dir* older than *days* days."""
+def _log_perf(stage: str, started_at: float, **fields: int | str | bool | None) -> None:
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    metrics = " ".join(f"{k}={v}" for k, v in fields.items())
+    log.info("perf.%s elapsed_ms=%.2f %s", stage, elapsed_ms, metrics)
+
+
+def find_old_logs(
+    log_dir: Path,
+    days: int,
+    *,
+    max_files: int | None = None,
+    skip_dirs: set[str] | None = None,
+) -> Iterator[Path]:
+    """Yield log files in *log_dir* older than *days* days."""
+    started_at = time.perf_counter()
     cutoff = datetime.now() - timedelta(days=days)
-    return [
-        p for p in log_dir.rglob("*.log")
-        if datetime.fromtimestamp(p.stat().st_mtime) < cutoff
-    ]
+    yielded = 0
+    scanned_dirs = 0
+    skip_dirs = skip_dirs or set()
+    try:
+        for root, dirs, files in os.walk(log_dir):
+            scanned_dirs += 1
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for name in files:
+                if not name.lower().endswith(".log"):
+                    continue
+                path = Path(root) / name
+                if datetime.fromtimestamp(path.stat().st_mtime) < cutoff:
+                    yield path
+                    yielded += 1
+                    if max_files is not None and yielded >= max_files:
+                        return
+    finally:
+        _log_perf(
+            "discovery",
+            started_at,
+            log_dir=log_dir,
+            max_files=max_files,
+            skip_dirs=len(skip_dirs),
+            scanned_dirs=scanned_dirs,
+            discovered=yielded,
+        )
 
 
 def archive_logs(
-    files: list[Path],
+    files: Iterator[Path],
     backup_dir: Path,
     *,
     dry_run: bool,
 ) -> int:
     """Copy *files* to *backup_dir*.  Returns the number of files archived."""
+    started_at = time.perf_counter()
     archived = 0
     for src in tqdm(files, desc="Archiving logs", unit="file"):
         dest = backup_dir / src.name
         if dry_run:
-            log.info("[dry-run] Would archive '%s' → '%s'.", src, dest)
+            if log.isEnabledFor(10):
+                log.debug("[dry-run] Would archive '%s' → '%s'.", src, dest)
         else:
             backup_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
-            log.info("Archived '%s' → '%s'.", src, dest)
+            if log.isEnabledFor(10):
+                log.debug("Archived '%s' → '%s'.", src, dest)
         archived += 1
+    _log_perf("archive", started_at, archived=archived, dry_run=dry_run)
     return archived
 
 
@@ -68,15 +110,20 @@ def main(args: argparse.Namespace) -> int:
         log.error("Log directory '%s' does not exist.", log_dir)
         return 1
 
-    old_files = find_old_logs(log_dir, args.days)
-    log.info("Found %d log file(s) older than %d day(s).", len(old_files), args.days)
-
-    if not old_files:
-        log.info("Nothing to archive.")
-        return 0
+    skip_dirs = {d for d in args.skip_dir if d}
+    old_files = find_old_logs(
+        log_dir,
+        args.days,
+        max_files=args.max_files,
+        skip_dirs=skip_dirs,
+    )
 
     backup_dir = Path(args.backup_dir)
     count = archive_logs(old_files, backup_dir, dry_run=args.dry_run)
+    if count == 0:
+        log.info("Nothing to archive.")
+        return 0
+    log.info("Found %d log file(s) older than %d day(s).", count, args.days)
     log.info("Archived %d file(s).", count)
     return 0
 
@@ -88,6 +135,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-dir", default="/var/log", help="Directory to scan.")
     parser.add_argument("--backup-dir", default="/var/log/archive", help="Backup destination.")
     parser.add_argument("--days", type=int, default=30, help="Age threshold in days (default: 30).")
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
+        help="Optional cap on number of matching log files to process.",
+    )
+    parser.add_argument(
+        "--skip-dir",
+        action="append",
+        default=[],
+        help="Directory name to skip during recursive discovery (repeatable).",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
