@@ -16,14 +16,37 @@ Usage
 from __future__ import annotations
 
 import os
+import threading
 from typing import Any
 
 from scripts.common.logger import get_logger
 
 log = get_logger(__name__)
+_config_cache: dict[str, Any] | None = None
+_config_cache_dotenv_path: str | None = None
+_config_cache_lock = threading.Lock()
 
 
-def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
+def _maybe_load_dotenv(dotenv_path: str | None) -> None:
+    try:
+        from dotenv import load_dotenv  # type: ignore[import-untyped]
+
+        if dotenv_path:
+            load_dotenv(dotenv_path, override=False)
+            log.debug("Loaded .env from '%s'.", dotenv_path)
+        else:
+            loaded = load_dotenv(override=False)
+            if loaded:
+                log.debug("Loaded .env from current directory.")
+    except ImportError:
+        log.debug("python-dotenv not installed; skipping .env loading.")
+
+
+def load_config(
+    dotenv_path: str | None = None,
+    *,
+    use_cache: bool = False,
+) -> dict[str, Any]:
     """Load configuration from environment variables.
 
     If ``python-dotenv`` is installed and a ``.env`` file exists, it is
@@ -40,19 +63,18 @@ def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
     dict
         A snapshot of the current environment variables.
     """
-    try:
-        from dotenv import load_dotenv  # type: ignore[import-untyped]
+    global _config_cache, _config_cache_dotenv_path
+    if use_cache:
+        with _config_cache_lock:
+            if _config_cache is not None and _config_cache_dotenv_path == dotenv_path:
+                return dict(_config_cache)
+            _maybe_load_dotenv(dotenv_path)
+            snapshot = dict(os.environ)
+            _config_cache = snapshot
+            _config_cache_dotenv_path = dotenv_path
+            return dict(snapshot)
 
-        if dotenv_path:
-            load_dotenv(dotenv_path, override=False)
-            log.debug("Loaded .env from '%s'.", dotenv_path)
-        else:
-            loaded = load_dotenv(override=False)
-            if loaded:
-                log.debug("Loaded .env from current directory.")
-    except ImportError:
-        log.debug("python-dotenv not installed; skipping .env loading.")
-
+    _maybe_load_dotenv(dotenv_path)
     return dict(os.environ)
 
 

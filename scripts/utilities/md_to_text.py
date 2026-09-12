@@ -9,9 +9,14 @@ It demonstrates: batch file conversion, tqdm progress bars,
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import os
 import re
 import sys
+import time
+import tracemalloc
 from pathlib import Path
+from typing import Iterable, Iterator
 
 # Ensure the repository root is on sys.path when this script is run directly.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -24,6 +29,14 @@ from scripts.common.logger import get_logger
 from scripts.common.file_ops import safe_write
 
 log = get_logger(__name__)
+
+if not tracemalloc.is_tracing():
+    tracemalloc.start()
+
+
+def _memory_kib() -> tuple[float, float]:
+    current, peak = tracemalloc.get_traced_memory()
+    return current / 1024.0, peak / 1024.0
 
 
 def md_to_text(md: str) -> str:
@@ -49,12 +62,13 @@ def md_to_text(md: str) -> str:
 
 
 def convert_files(
-    input_paths: list[Path],
+    input_paths: Iterable[Path],
     output_dir: Path,
     *,
     dry_run: bool,
 ) -> int:
     """Convert *input_paths* to plain text in *output_dir*."""
+    start = time.perf_counter()
     converted = 0
     for src in tqdm(input_paths, desc="Converting", unit="file"):
         dest = output_dir / src.with_suffix(".txt").name
@@ -62,20 +76,82 @@ def convert_files(
         plain = md_to_text(md)
         safe_write(dest, plain, dry_run=dry_run)
         converted += 1
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    current_kib, peak_kib = _memory_kib()
+    log.info(
+        "perf.convert_files converted=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        converted,
+        elapsed_ms,
+        current_kib,
+        peak_kib,
+    )
     return converted
+
+
+def iter_markdown_files(
+    input_dir: Path,
+    *,
+    include_pattern: str = "*.md",
+    exclude_pattern: str | None = None,
+    max_depth: int | None = None,
+    limit: int | None = None,
+) -> Iterator[Path]:
+    """Yield Markdown files incrementally with optional scan controls."""
+    start = time.perf_counter()
+    yielded = 0
+    for root, dirs, names in os.walk(input_dir, topdown=True):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(input_dir)
+        depth = 0 if str(rel_root) == "." else len(rel_root.parts)
+        if max_depth is not None and (depth + 1) > max_depth:
+            dirs[:] = []
+        for name in names:
+            if not fnmatch.fnmatch(name, include_pattern):
+                continue
+            if max_depth is not None and depth > max_depth:
+                continue
+            path = root_path / name
+            rel_str = str(path.relative_to(input_dir))
+            if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
+                continue
+            yield path
+            yielded += 1
+            if limit is not None and yielded >= limit:
+                break
+        if limit is not None and yielded >= limit:
+            break
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    current_kib, peak_kib = _memory_kib()
+    log.info(
+        "perf.iter_markdown_files root=%s yielded=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        input_dir,
+        yielded,
+        elapsed_ms,
+        current_kib,
+        peak_kib,
+    )
 
 
 def main(args: argparse.Namespace) -> int:
     log.info("md_to_text starting (dry_run=%s)", args.dry_run)
-
-    input_paths = list(Path(args.input_dir).rglob("*.md"))
-    if not input_paths:
+    scan_root = Path(args.input_dir)
+    output_dir = Path(args.output_dir)
+    count = convert_files(
+        iter_markdown_files(
+            scan_root,
+            include_pattern=args.include,
+            exclude_pattern=args.exclude,
+            max_depth=args.max_depth,
+            limit=args.limit,
+        ),
+        output_dir,
+        dry_run=args.dry_run,
+    )
+    if count == 0:
         log.warning("No Markdown files found in '%s'.", args.input_dir)
         return 0
 
-    log.info("Found %d Markdown file(s).", len(input_paths))
-    output_dir = Path(args.output_dir)
-    count = convert_files(input_paths, output_dir, dry_run=args.dry_run)
+    log.info("Found %d Markdown file(s).", count)
     log.info("Converted %d file(s).", count)
     return 0
 
@@ -86,6 +162,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--input-dir", default=".", help="Directory to scan for .md files.")
     parser.add_argument("--output-dir", default="./output", help="Destination directory for .txt files.")
+    parser.add_argument(
+        "--include",
+        default="*.md",
+        help="File name pattern to include during scan (default: *.md).",
+    )
+    parser.add_argument(
+        "--exclude",
+        default=None,
+        help="Optional relative path glob pattern to exclude.",
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help="Maximum scan depth relative to input-dir.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of files to process.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",

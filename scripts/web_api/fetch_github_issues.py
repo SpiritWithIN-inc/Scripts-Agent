@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import time
+import tracemalloc
 from pathlib import Path
+from typing import Iterator
 
 # Ensure the repository root is on sys.path when this script is run directly.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -20,51 +23,100 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import requests
+from requests.adapters import HTTPAdapter
 from tqdm import tqdm
+from urllib3.util.retry import Retry
 
 from scripts.common.logger import get_logger
-from scripts.common.config import require_env
 
 log = get_logger(__name__)
+
+if not tracemalloc.is_tracing():
+    tracemalloc.start()
 
 GITHUB_API = "https://api.github.com"
 ISSUES_FIELDS = ["number", "title", "state", "created_at", "updated_at", "html_url", "user"]
 
 
+def _memory_kib() -> tuple[float, float]:
+    current, peak = tracemalloc.get_traced_memory()
+    return current / 1024.0, peak / 1024.0
+
+
 def _headers(token: str | None) -> dict[str, str]:
     h = {"Accept": "application/vnd.github+json"}
     if token:
-        h["Authorization"] = f"Bearer {token}"
+        h["Authorization"] = "Bearer " + str(token)
     return h
 
 
-def fetch_issues(
+def _build_session() -> requests.Session:
+    retry = Retry(
+        total=5,
+        backoff_factor=1.0,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=("GET",),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def iter_issue_pages(
     owner: str,
     repo: str,
     token: str | None,
     *,
+    session: requests.Session,
     state: str = "all",
     per_page: int = 100,
-) -> list[dict]:
-    """Fetch all issues from *owner/repo* using pagination."""
+) -> Iterator[list[dict]]:
+    """Yield issue pages from *owner/repo* using pagination."""
+    start = time.perf_counter()
     url = f"{GITHUB_API}/repos/{owner}/{repo}/issues"
     params: dict = {"state": state, "per_page": per_page, "page": 1}
-    all_issues: list[dict] = []
+    pages = 0
+    issues = 0
 
     with tqdm(desc="Fetching issues", unit="page") as bar:
         while True:
-            resp = requests.get(url, headers=_headers(token), params=params, timeout=30)
+            page_start = time.perf_counter()
+            resp = session.get(url, headers=_headers(token), params=params, timeout=30)
             _handle_rate_limit(resp)
             resp.raise_for_status()
             page = resp.json()
             if not page:
                 break
-            all_issues.extend(page)
+            pages += 1
+            issues += len(page)
+            page_elapsed_ms = (time.perf_counter() - page_start) * 1000
+            current_kib, peak_kib = _memory_kib()
+            log.info(
+                "perf.fetch_issue_page page=%d items=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+                params["page"],
+                len(page),
+                page_elapsed_ms,
+                current_kib,
+                peak_kib,
+            )
+            yield page
             bar.update(1)
             params["page"] += 1
 
-    log.info("Fetched %d issue(s) from %s/%s.", len(all_issues), owner, repo)
-    return all_issues
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    current_kib, peak_kib = _memory_kib()
+    log.info(
+        "perf.iter_issue_pages pages=%d issues=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        pages,
+        issues,
+        elapsed_ms,
+        current_kib,
+        peak_kib,
+    )
+    log.info("Fetched %d issue(s) from %s/%s.", issues, owner, repo)
 
 
 def _handle_rate_limit(resp: requests.Response) -> None:
@@ -99,21 +151,43 @@ def main(args: argparse.Namespace) -> int:
         args.dry_run,
     )
 
-    token = args.token
-    issues = fetch_issues(args.owner, args.repo, token, state=args.state)
-    rows = issues_to_rows(issues)
+    token = args.token or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        log.warning("No GitHub token provided; requests may be heavily rate-limited.")
+
+    session = _build_session()
     output = Path(args.output)
+    total_rows = 0
+    write_start = time.perf_counter()
 
-    if args.dry_run:
-        log.info("[dry-run] Would write %d row(s) to '%s'.", len(rows), output)
-        return 0
+    try:
+        if args.dry_run:
+            for page in iter_issue_pages(args.owner, args.repo, token, state=args.state, session=session):
+                total_rows += len(page)
+            log.info("[dry-run] Would write %d row(s) to '%s'.", total_rows, output)
+            return 0
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=ISSUES_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-    log.info("Wrote %d issue(s) to '%s'.", len(rows), output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("w", encoding="utf-8", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=ISSUES_FIELDS)
+            writer.writeheader()
+            for page in iter_issue_pages(args.owner, args.repo, token, state=args.state, session=session):
+                rows = issues_to_rows(page)
+                writer.writerows(rows)
+                total_rows += len(rows)
+    finally:
+        session.close()
+
+    elapsed_ms = (time.perf_counter() - write_start) * 1000
+    current_kib, peak_kib = _memory_kib()
+    log.info(
+        "perf.write_issues_csv rows=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        total_rows,
+        elapsed_ms,
+        current_kib,
+        peak_kib,
+    )
+    log.info("Wrote %d issue(s) to '%s'.", total_rows, output)
     return 0
 
 
