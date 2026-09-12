@@ -163,21 +163,24 @@ def tool_list_files(
 
     files: list[str] = []
     scanned = 0
-    for p in base.rglob("*"):
-        if not p.is_file():
-            continue
-        scanned += 1
-        rel = p.relative_to(REPO_ROOT)
-        base_rel = p.relative_to(base)
-        rel_str = str(rel)
-        depth = len(base_rel.parts) - 1
-        if max_depth is not None and depth > max_depth:
-            continue
-        if include_pattern and not fnmatch.fnmatch(rel.name, include_pattern):
-            continue
-        if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
-            continue
-        files.append(rel_str)
+    for root, dirs, names in os.walk(base, topdown=True):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(base)
+        depth = 0 if str(rel_root) == "." else len(rel_root.parts)
+        if max_depth is not None and depth >= max_depth:
+            dirs[:] = []
+        for name in names:
+            scanned += 1
+            if include_pattern and not fnmatch.fnmatch(name, include_pattern):
+                continue
+            file_path = root_path / name
+            rel = file_path.relative_to(REPO_ROOT)
+            rel_str = str(rel)
+            if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
+                continue
+            files.append(rel_str)
+            if limit is not None and len(files) >= limit:
+                break
         if limit is not None and len(files) >= limit:
             break
 

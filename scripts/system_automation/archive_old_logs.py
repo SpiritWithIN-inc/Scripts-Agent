@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import os
 import shutil
 import sys
 import time
@@ -52,22 +53,27 @@ def iter_old_logs(
     cutoff = datetime.now() - timedelta(days=days)
     matched = 0
     scanned = 0
-    for p in log_dir.rglob(include_pattern):
-        if not p.is_file():
-            continue
-        scanned += 1
-        rel = p.relative_to(log_dir)
-        depth = len(rel.parts) - 1
-        if max_depth is not None and depth > max_depth:
-            continue
-        rel_str = str(rel)
-        if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
-            continue
-        if datetime.fromtimestamp(p.stat().st_mtime) < cutoff:
-            matched += 1
-            yield p
-            if limit is not None and matched >= limit:
-                break
+    for root, dirs, names in os.walk(log_dir, topdown=True):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(log_dir)
+        depth = 0 if str(rel_root) == "." else len(rel_root.parts)
+        if max_depth is not None and depth >= max_depth:
+            dirs[:] = []
+        for name in names:
+            if not fnmatch.fnmatch(name, include_pattern):
+                continue
+            p = root_path / name
+            scanned += 1
+            rel_str = str(p.relative_to(log_dir))
+            if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
+                continue
+            if datetime.fromtimestamp(p.stat().st_mtime) < cutoff:
+                matched += 1
+                yield p
+                if limit is not None and matched >= limit:
+                    break
+        if limit is not None and matched >= limit:
+            break
     elapsed_ms = (time.perf_counter() - start) * 1000
     current_kib, peak_kib = _memory_kib()
     log.info(

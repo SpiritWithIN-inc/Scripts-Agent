@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import os
 import re
 import sys
 import time
@@ -98,18 +99,23 @@ def iter_markdown_files(
     """Yield Markdown files incrementally with optional scan controls."""
     start = time.perf_counter()
     yielded = 0
-    for path in input_dir.rglob(include_pattern):
-        if not path.is_file():
-            continue
-        rel = path.relative_to(input_dir)
-        depth = len(rel.parts) - 1
-        if max_depth is not None and depth > max_depth:
-            continue
-        rel_str = str(rel)
-        if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
-            continue
-        yield path
-        yielded += 1
+    for root, dirs, names in os.walk(input_dir, topdown=True):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(input_dir)
+        depth = 0 if str(rel_root) == "." else len(rel_root.parts)
+        if max_depth is not None and depth >= max_depth:
+            dirs[:] = []
+        for name in names:
+            if not fnmatch.fnmatch(name, include_pattern):
+                continue
+            path = root_path / name
+            rel_str = str(path.relative_to(input_dir))
+            if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
+                continue
+            yield path
+            yielded += 1
+            if limit is not None and yielded >= limit:
+                break
         if limit is not None and yielded >= limit:
             break
     elapsed_ms = (time.perf_counter() - start) * 1000
