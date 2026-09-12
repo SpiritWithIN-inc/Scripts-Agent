@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 # Ensure the repository root is on sys.path when this script is run directly.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -23,7 +25,6 @@ import requests
 from tqdm import tqdm
 
 from scripts.common.logger import get_logger
-from scripts.common.config import require_env
 
 log = get_logger(__name__)
 
@@ -34,61 +35,164 @@ ISSUES_FIELDS = ["number", "title", "state", "created_at", "updated_at", "html_u
 def _headers(token: str | None) -> dict[str, str]:
     h = {"Accept": "application/vnd.github+json"}
     if token:
-        h["Authorization"] = f"Bearer {token}"
+        h["Authorization"] = f"******"
     return h
 
 
-def fetch_issues(
+def _log_perf(stage: str, started_at: float, **fields: Any) -> None:
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    metrics = " ".join(f"{k}={v}" for k, v in fields.items())
+    log.info("perf.%s elapsed_ms=%.2f %s", stage, elapsed_ms, metrics)
+
+
+def _request_page(
+    session: requests.Session,
+    url: str,
+    *,
+    headers: dict[str, str],
+    params: dict[str, Any],
+    max_retries: int = 4,
+    max_backoff_seconds: int = 30,
+) -> requests.Response:
+    """Request a single API page with bounded retries/backoff."""
+    for attempt in range(max_retries + 1):
+        try:
+            resp = session.get(url, headers=headers, params=params, timeout=30)
+        except requests.RequestException as exc:
+            if attempt >= max_retries:
+                raise RuntimeError(f"GitHub request failed after {max_retries + 1} attempts.") from exc
+            wait = min(max_backoff_seconds, 2**attempt)
+            log.warning(
+                "Request error on attempt %d/%d: %s; retrying in %ds.",
+                attempt + 1,
+                max_retries + 1,
+                exc,
+                wait,
+            )
+            time.sleep(wait)
+            continue
+
+        try:
+            remaining = int(resp.headers.get("X-RateLimit-Remaining", "1"))
+        except (TypeError, ValueError):
+            remaining = 1
+        if resp.status_code in (403, 429) and (remaining == 0 or resp.status_code == 429):
+            if attempt >= max_retries:
+                resp.raise_for_status()
+            reset_header = resp.headers.get("X-RateLimit-Reset")
+            if reset_header and remaining == 0:
+                try:
+                    wait = max(1, int(reset_header) - int(time.time()))
+                except (TypeError, ValueError):
+                    wait = min(max_backoff_seconds, 2**attempt)
+            else:
+                wait = min(max_backoff_seconds, 2**attempt)
+            log.warning(
+                "Rate limit encountered on attempt %d/%d; waiting %ds.",
+                attempt + 1,
+                max_retries + 1,
+                wait,
+            )
+            time.sleep(wait)
+            continue
+
+        if 500 <= resp.status_code < 600:
+            if attempt >= max_retries:
+                resp.raise_for_status()
+            wait = min(max_backoff_seconds, 2**attempt)
+            log.warning(
+                "GitHub server error %d on attempt %d/%d; retrying in %ds.",
+                resp.status_code,
+                attempt + 1,
+                max_retries + 1,
+                wait,
+            )
+            time.sleep(wait)
+            continue
+
+        resp.raise_for_status()
+        return resp
+
+    raise RuntimeError("Exceeded retry budget while fetching GitHub issues.")
+
+
+def issue_to_row(issue: dict[str, Any]) -> dict[str, str]:
+    return {
+        "number": str(issue.get("number", "")),
+        "title": issue.get("title", ""),
+        "state": issue.get("state", ""),
+        "created_at": issue.get("created_at", ""),
+        "updated_at": issue.get("updated_at", ""),
+        "html_url": issue.get("html_url", ""),
+        "user": (issue.get("user") or {}).get("login", ""),
+    }
+
+
+def stream_issues_to_csv(
     owner: str,
     repo: str,
     token: str | None,
+    output: Path,
     *,
     state: str = "all",
     per_page: int = 100,
-) -> list[dict]:
-    """Fetch all issues from *owner/repo* using pagination."""
+    dry_run: bool = False,
+    max_pages: int | None = None,
+) -> int:
+    """Fetch paginated issues and stream output to CSV (or dry-run counters)."""
     url = f"{GITHUB_API}/repos/{owner}/{repo}/issues"
-    params: dict = {"state": state, "per_page": per_page, "page": 1}
-    all_issues: list[dict] = []
+    headers = _headers(token)
+    page = 1
+    total_issues = 0
+    fetched_pages = 0
+    write_started_at = time.perf_counter()
 
-    with tqdm(desc="Fetching issues", unit="page") as bar:
-        while True:
-            resp = requests.get(url, headers=_headers(token), params=params, timeout=30)
-            _handle_rate_limit(resp)
-            resp.raise_for_status()
-            page = resp.json()
-            if not page:
-                break
-            all_issues.extend(page)
-            bar.update(1)
-            params["page"] += 1
+    with requests.Session() as session:
+        with tqdm(desc="Fetching issues", unit="page") as bar:
+            writer: csv.DictWriter | None = None
+            out_fh = None
+            if not dry_run:
+                output.parent.mkdir(parents=True, exist_ok=True)
+                out_fh = output.open("w", encoding="utf-8", newline="")
+                writer = csv.DictWriter(out_fh, fieldnames=ISSUES_FIELDS)
+                writer.writeheader()
+            try:
+                while True:
+                    if max_pages is not None and fetched_pages >= max_pages:
+                        break
+                    fetch_started_at = time.perf_counter()
+                    resp = _request_page(
+                        session,
+                        url,
+                        headers=headers,
+                        params={"state": state, "per_page": per_page, "page": page},
+                    )
+                    page_items = resp.json()
+                    issues = [item for item in page_items if "pull_request" not in item]
+                    _log_perf(
+                        "fetch_page",
+                        fetch_started_at,
+                        page=page,
+                        items=len(page_items),
+                        issues=len(issues),
+                    )
+                    if not page_items:
+                        break
 
-    log.info("Fetched %d issue(s) from %s/%s.", len(all_issues), owner, repo)
-    return all_issues
+                    for issue in issues:
+                        if writer is not None:
+                            writer.writerow(issue_to_row(issue))
+                        total_issues += 1
 
+                    fetched_pages += 1
+                    page += 1
+                    bar.update(1)
+            finally:
+                if out_fh is not None:
+                    out_fh.close()
 
-def _handle_rate_limit(resp: requests.Response) -> None:
-    remaining = int(resp.headers.get("X-RateLimit-Remaining", 1))
-    if remaining == 0:
-        reset = int(resp.headers.get("X-RateLimit-Reset", time.time() + 60))
-        wait = max(0, reset - int(time.time())) + 1
-        log.warning("Rate limit hit; sleeping %ds.", wait)
-        time.sleep(wait)
-
-
-def issues_to_rows(issues: list[dict]) -> list[dict[str, str]]:
-    rows = []
-    for issue in issues:
-        rows.append({
-            "number": str(issue.get("number", "")),
-            "title": issue.get("title", ""),
-            "state": issue.get("state", ""),
-            "created_at": issue.get("created_at", ""),
-            "updated_at": issue.get("updated_at", ""),
-            "html_url": issue.get("html_url", ""),
-            "user": (issue.get("user") or {}).get("login", ""),
-        })
-    return rows
+    _log_perf("export_write", write_started_at, pages=fetched_pages, issues=total_issues, dry_run=dry_run)
+    return total_issues
 
 
 def main(args: argparse.Namespace) -> int:
@@ -99,21 +203,23 @@ def main(args: argparse.Namespace) -> int:
         args.dry_run,
     )
 
-    token = args.token
-    issues = fetch_issues(args.owner, args.repo, token, state=args.state)
-    rows = issues_to_rows(issues)
     output = Path(args.output)
+    token = args.token or os.environ.get("GITHUB_TOKEN")
+    total = stream_issues_to_csv(
+        args.owner,
+        args.repo,
+        token,
+        output,
+        state=args.state,
+        dry_run=args.dry_run,
+        max_pages=args.max_pages,
+    )
 
     if args.dry_run:
-        log.info("[dry-run] Would write %d row(s) to '%s'.", len(rows), output)
+        log.info("[dry-run] Would write %d row(s) to '%s'.", total, output)
         return 0
 
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=ISSUES_FIELDS)
-        writer.writeheader()
-        writer.writerows(rows)
-    log.info("Wrote %d issue(s) to '%s'.", len(rows), output)
+    log.info("Wrote %d issue(s) to '%s'.", total, output)
     return 0
 
 
@@ -135,6 +241,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Show what would be done without writing files.",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        help="Optional cap on fetched API pages.",
     )
     return parser.parse_args(argv)
 

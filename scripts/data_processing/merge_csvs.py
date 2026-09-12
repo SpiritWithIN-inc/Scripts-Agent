@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import time
 from pathlib import Path
 
 # Ensure the repository root is on sys.path when this script is run directly.
@@ -26,14 +27,20 @@ from scripts.common.file_ops import safe_write
 log = get_logger(__name__)
 
 
+def _log_perf(stage: str, started_at: float, **fields: int | str | None) -> None:
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    metrics = " ".join(f"{k}={v}" for k, v in fields.items())
+    log.info("perf.%s elapsed_ms=%.2f %s", stage, elapsed_ms, metrics)
+
+
 def normalize_header(header: list[str]) -> list[str]:
     """Return a normalized version of *header* (lowercase, underscores, stripped)."""
     return [col.strip().lower().replace(" ", "_").replace("-", "_") for col in header]
 
 
-def merge_csvs(input_paths: list[Path]) -> tuple[list[str], list[dict[str, str]]]:
-    """Merge CSV files and return (unified_headers, rows)."""
-    all_rows: list[dict[str, str]] = []
+def discover_headers(input_paths: list[Path]) -> list[str]:
+    """Read headers across files and return a normalized unified header list."""
+    started_at = time.perf_counter()
     all_headers: list[str] = []
 
     for path in tqdm(input_paths, desc="Reading CSVs", unit="file"):
@@ -43,22 +50,60 @@ def merge_csvs(input_paths: list[Path]) -> tuple[list[str], list[dict[str, str]]
                 log.warning("Skipping '%s': no headers found.", path)
                 continue
             norm = normalize_header(list(reader.fieldnames))
-            mapping = dict(zip(reader.fieldnames, norm))
-            for row in reader:
-                all_rows.append({mapping[k]: v for k, v in row.items()})
             for h in norm:
                 if h not in all_headers:
                     all_headers.append(h)
 
-    return all_headers, all_rows
+    _log_perf("read_normalize", started_at, files=len(input_paths), columns=len(all_headers))
+    return all_headers
 
 
-def build_summary(headers: list[str], rows: list[dict[str, str]]) -> str:
+def stream_rows(
+    input_paths: list[Path],
+    headers: list[str],
+    output_path: Path,
+    *,
+    dry_run: bool,
+) -> int:
+    """Stream normalized rows from inputs to output and return total row count."""
+    started_at = time.perf_counter()
+    total_rows = 0
+
+    writer: csv.DictWriter | None = None
+    out_fh = None
+    if not dry_run:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        out_fh = output_path.open("w", encoding="utf-8", newline="")
+        writer = csv.DictWriter(out_fh, fieldnames=headers, extrasaction="ignore")
+        writer.writeheader()
+
+    try:
+        for path in tqdm(input_paths, desc="Writing merged CSV", unit="file"):
+            with path.open(encoding="utf-8", newline="") as fh:
+                reader = csv.DictReader(fh)
+                if reader.fieldnames is None:
+                    continue
+                norm = normalize_header(list(reader.fieldnames))
+                mapping = dict(zip(reader.fieldnames, norm))
+                for row in reader:
+                    normalized_row = {mapping[k]: v for k, v in row.items()}
+                    if writer is not None:
+                        writer.writerow(normalized_row)
+                    total_rows += 1
+    finally:
+        if out_fh is not None:
+            out_fh.close()
+
+    _log_perf("write", started_at, files=len(input_paths), rows=total_rows, dry_run=dry_run)
+    return total_rows
+
+
+def build_summary(headers: list[str], row_count: int) -> str:
     """Return a plain-text summary report."""
     lines = [
         f"Summary Report",
         f"==============",
-        f"Total rows   : {len(rows)}",
+        f"Total rows   : {row_count}",
         f"Columns ({len(headers)}): {', '.join(headers)}",
     ]
     return "\n".join(lines)
@@ -73,23 +118,18 @@ def main(args: argparse.Namespace) -> int:
         log.error("Files not found: %s", missing)
         return 1
 
-    headers, rows = merge_csvs(input_paths)
-    log.info("Merged %d row(s) across %d file(s).", len(rows), len(input_paths))
-
-    # Write merged CSV
+    headers = discover_headers(input_paths)
     output_path = Path(args.output)
+    row_count = stream_rows(input_paths, headers, output_path, dry_run=args.dry_run)
+    log.info("Merged %d row(s) across %d file(s).", row_count, len(input_paths))
+
     if args.dry_run:
         log.info("[dry-run] Would write merged CSV to '%s'.", output_path)
     else:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=headers, extrasaction="ignore")
-            writer.writeheader()
-            writer.writerows(rows)
         log.info("Merged CSV written to '%s'.", output_path)
 
     # Write summary report
-    summary = build_summary(headers, rows)
+    summary = build_summary(headers, row_count)
     report_path = output_path.with_suffix(".txt")
     safe_write(report_path, summary, dry_run=args.dry_run)
 

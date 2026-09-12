@@ -27,6 +27,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -127,12 +128,36 @@ Script rules:
 # Tool helpers
 # ---------------------------------------------------------------------------
 
-def tool_list_files(directory: str | Path = SCRIPTS_ROOT) -> list[str]:
+def _log_perf(stage: str, started_at: float, *, level: int = logging.INFO, **fields: Any) -> None:
+    """Emit a concise perf log line for *stage*."""
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    metrics = " ".join(f"{k}={v}" for k, v in fields.items())
+    log.log(level, "perf.%s elapsed_ms=%.2f %s", stage, elapsed_ms, metrics)
+
+
+def tool_list_files(
+    directory: str | Path = SCRIPTS_ROOT,
+    *,
+    limit: int | None = None,
+) -> list[str]:
     """Return a sorted list of files under *directory* relative to REPO_ROOT."""
+    started_at = time.perf_counter()
     base = Path(directory)
     if not base.exists():
+        _log_perf("tool_list_files", started_at, files=0, limit=limit)
         return []
-    return sorted(str(p.relative_to(REPO_ROOT)) for p in base.rglob("*") if p.is_file())
+
+    files: list[str] = []
+    for path in base.rglob("*"):
+        if not path.is_file():
+            continue
+        files.append(str(path.relative_to(REPO_ROOT)))
+
+    files.sort()
+    if limit is not None:
+        files = files[:limit]
+    _log_perf("tool_list_files", started_at, files=len(files), limit=limit)
+    return files
 
 
 def tool_read_file(path: str | Path) -> str:
@@ -186,26 +211,6 @@ def _assert_in_scripts(path: Path) -> None:
         )
 
 
-def _call_llm(messages: list[dict[str, str]], model: str = "gpt-4o-mini") -> str:
-    """Call the OpenAI chat API and return the assistant message content."""
-    if not _OPENAI_AVAILABLE:
-        raise RuntimeError(
-            "openai package is not installed. Run: pip install openai"
-        )
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY environment variable is not set."
-        )
-    client = OpenAI(api_key=api_key)
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=0.2,
-    )
-    return response.choices[0].message.content
-
-
 def _parse_plan(raw: str) -> list[dict[str, Any]]:
     """Extract and parse the JSON plan from *raw* LLM output."""
     raw = raw.strip()
@@ -234,6 +239,7 @@ class CodingAgent:
     ) -> None:
         self.dry_run = dry_run and not auto_apply
         self.model = model
+        self._client: Any | None = None
         log.info(
             "CodingAgent initialized (dry_run=%s, model=%s)",
             self.dry_run,
@@ -255,10 +261,12 @@ class CodingAgent:
         log.info("Plan contains %d script(s).", len(plan))
 
         written: list[Path] = []
+        apply_started_at = time.perf_counter()
         for entry in plan:
             path = self._apply_entry(entry)
             if path:
                 written.append(path)
+        _log_perf("apply_entry_total", apply_started_at, entries=len(plan), written=len(written))
 
         return written
 
@@ -278,14 +286,18 @@ class CodingAgent:
     # ------------------------------------------------------------------
 
     def _plan(self, task: str) -> list[dict[str, Any]]:
+        started_at = time.perf_counter()
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": task},
         ]
-        raw = _call_llm(messages, model=self.model)
-        return _parse_plan(raw)
+        raw = self._call_llm(messages, model=self.model)
+        plan = _parse_plan(raw)
+        _log_perf("plan", started_at, entries=len(plan))
+        return plan
 
     def _apply_entry(self, entry: dict[str, Any]) -> Path | None:
+        started_at = time.perf_counter()
         category = entry.get("category", "utilities")
         filename = entry.get("filename", "script.py")
         body = entry.get("body", "")
@@ -297,7 +309,40 @@ class CodingAgent:
         dest = CATEGORIES[category] / filename
         result = tool_write_file(dest, body, dry_run=self.dry_run)
         log.info(result)
+        _log_perf(
+            "apply_entry",
+            started_at,
+            level=logging.DEBUG,
+            category=category,
+            filename=filename,
+            dry_run=self.dry_run,
+        )
         return None if self.dry_run else dest
+
+    def _get_client(self) -> Any:
+        """Return an OpenAI client, lazily initialized and reused per instance."""
+        if self._client is not None:
+            return self._client
+        if not _OPENAI_AVAILABLE:
+            raise RuntimeError("openai package is not installed. Run: pip install openai")
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+        self._client = OpenAI(api_key=api_key)
+        return self._client
+
+    def _call_llm(self, messages: list[dict[str, str]], model: str) -> str:
+        """Call the OpenAI chat API and return the assistant message content."""
+        started_at = time.perf_counter()
+        client = self._get_client()
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+        )
+        content = response.choices[0].message.content
+        _log_perf("call_llm", started_at, model=model, messages=len(messages))
+        return content
 
     def _recommend_git_snapshot(self) -> None:
         log.info(
@@ -338,6 +383,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="List existing scripts and exit.",
     )
+    parser.add_argument(
+        "--list-limit",
+        type=int,
+        default=None,
+        help="Optional max number of files returned by --list-files.",
+    )
     return parser
 
 
@@ -346,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.list_files:
-        files = tool_list_files()
+        files = tool_list_files(limit=args.list_limit)
         if files:
             print("\n".join(files))
         else:

@@ -9,8 +9,11 @@ It demonstrates: batch file conversion, tqdm progress bars,
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
+import time
+from collections.abc import Iterator
 from pathlib import Path
 
 # Ensure the repository root is on sys.path when this script is run directly.
@@ -24,6 +27,12 @@ from scripts.common.logger import get_logger
 from scripts.common.file_ops import safe_write
 
 log = get_logger(__name__)
+
+
+def _log_perf(stage: str, started_at: float, **fields: int | str | None) -> None:
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    metrics = " ".join(f"{k}={v}" for k, v in fields.items())
+    log.info("perf.%s elapsed_ms=%.2f %s", stage, elapsed_ms, metrics)
 
 
 def md_to_text(md: str) -> str:
@@ -49,12 +58,13 @@ def md_to_text(md: str) -> str:
 
 
 def convert_files(
-    input_paths: list[Path],
+    input_paths: Iterator[Path],
     output_dir: Path,
     *,
     dry_run: bool,
 ) -> int:
     """Convert *input_paths* to plain text in *output_dir*."""
+    started_at = time.perf_counter()
     converted = 0
     for src in tqdm(input_paths, desc="Converting", unit="file"):
         dest = output_dir / src.with_suffix(".txt").name
@@ -62,20 +72,59 @@ def convert_files(
         plain = md_to_text(md)
         safe_write(dest, plain, dry_run=dry_run)
         converted += 1
+    _log_perf("conversion", started_at, converted=converted, dry_run=dry_run)
     return converted
+
+
+def discover_markdown_files(
+    input_dir: Path,
+    *,
+    max_files: int | None = None,
+    skip_dirs: set[str] | None = None,
+) -> Iterator[Path]:
+    """Yield Markdown files under *input_dir* with optional caps/pruning."""
+    started_at = time.perf_counter()
+    yielded = 0
+    scanned_dirs = 0
+    skip_dirs = skip_dirs or set()
+    try:
+        for root, dirs, files in os.walk(input_dir):
+            scanned_dirs += 1
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for name in files:
+                if not name.lower().endswith(".md"):
+                    continue
+                yield Path(root) / name
+                yielded += 1
+                if max_files is not None and yielded >= max_files:
+                    return
+    finally:
+        _log_perf(
+            "discovery",
+            started_at,
+            input_dir=input_dir,
+            max_files=max_files,
+            skip_dirs=len(skip_dirs),
+            scanned_dirs=scanned_dirs,
+            discovered=yielded,
+        )
 
 
 def main(args: argparse.Namespace) -> int:
     log.info("md_to_text starting (dry_run=%s)", args.dry_run)
 
-    input_paths = list(Path(args.input_dir).rglob("*.md"))
-    if not input_paths:
-        log.warning("No Markdown files found in '%s'.", args.input_dir)
-        return 0
-
-    log.info("Found %d Markdown file(s).", len(input_paths))
+    input_dir = Path(args.input_dir)
+    skip_dirs = {d for d in args.skip_dir if d}
+    input_paths = discover_markdown_files(
+        input_dir,
+        max_files=args.max_files,
+        skip_dirs=skip_dirs,
+    )
     output_dir = Path(args.output_dir)
     count = convert_files(input_paths, output_dir, dry_run=args.dry_run)
+    if count == 0:
+        log.warning("No Markdown files found in '%s'.", args.input_dir)
+        return 0
     log.info("Converted %d file(s).", count)
     return 0
 
@@ -86,6 +135,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--input-dir", default=".", help="Directory to scan for .md files.")
     parser.add_argument("--output-dir", default="./output", help="Destination directory for .txt files.")
+    parser.add_argument(
+        "--max-files",
+        type=int,
+        default=None,
+        help="Optional cap on discovered Markdown files.",
+    )
+    parser.add_argument(
+        "--skip-dir",
+        action="append",
+        default=[],
+        help="Directory name to skip during recursive discovery (repeatable).",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",

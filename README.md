@@ -45,6 +45,7 @@ export OPENAI_API_KEY=sk-...
 
 ```bash
 python main.py --list-files
+python main.py --list-files --list-limit 100
 ```
 
 ### Get a plan (no files written)
