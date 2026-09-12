@@ -76,9 +76,11 @@ def _request_page(
         if resp.status_code in (403, 429) and (remaining == 0 or resp.status_code == 429):
             if attempt >= max_retries:
                 resp.raise_for_status()
-            reset = int(resp.headers.get("X-RateLimit-Reset", str(int(time.time()) + 60)))
-            wait = max(1, reset - int(time.time()))
-            wait = min(wait, max_backoff_seconds)
+            reset_header = resp.headers.get("X-RateLimit-Reset")
+            if reset_header and remaining == 0:
+                wait = max(1, int(reset_header) - int(time.time()))
+            else:
+                wait = min(max_backoff_seconds, 2**attempt)
             log.warning(
                 "Rate limit encountered on attempt %d/%d; waiting %ds.",
                 attempt + 1,
@@ -165,6 +167,8 @@ def stream_issues_to_csv(
                         break
 
                     for issue in issues:
+                        if "pull_request" in issue:
+                            continue
                         if writer is not None:
                             writer.writerow(issue_to_row(issue))
                         total_issues += 1

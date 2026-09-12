@@ -22,6 +22,7 @@ Safe defaults
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
 import logging
 import os
@@ -147,15 +148,15 @@ def tool_list_files(
         _log_perf("tool_list_files", started_at, files=0, limit=limit)
         return []
 
-    files: list[str] = []
-    for path in base.rglob("*"):
-        if not path.is_file():
-            continue
-        files.append(str(path.relative_to(REPO_ROOT)))
-        if limit is not None and len(files) >= limit:
-            break
-
-    files.sort()
+    files_iter = (
+        str(path.relative_to(REPO_ROOT))
+        for path in base.rglob("*")
+        if path.is_file()
+    )
+    if limit is None:
+        files = sorted(files_iter)
+    else:
+        files = heapq.nsmallest(limit, files_iter)
     _log_perf("tool_list_files", started_at, files=len(files), limit=limit)
     return files
 
