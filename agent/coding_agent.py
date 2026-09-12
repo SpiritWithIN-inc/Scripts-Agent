@@ -167,7 +167,7 @@ def tool_list_files(
         root_path = Path(root)
         rel_root = root_path.relative_to(base)
         depth = 0 if str(rel_root) == "." else len(rel_root.parts)
-        if max_depth is not None and depth >= max_depth:
+        if max_depth is not None and (depth + 1) > max_depth:
             dirs[:] = []
         for name in names:
             scanned += 1

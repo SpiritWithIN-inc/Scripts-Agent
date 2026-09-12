@@ -46,7 +46,7 @@ def _memory_kib() -> tuple[float, float]:
 def _headers(token: str | None) -> dict[str, str]:
     h = {"Accept": "application/vnd.github+json"}
     if token:
-        h["Authorization"] = "Bearer " + token
+        h["Authorization"] = "Bearer " + str(token)
     return h
 
 
