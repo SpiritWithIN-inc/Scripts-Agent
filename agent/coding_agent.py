@@ -167,9 +167,13 @@ def tool_list_files(
         root_path = Path(root)
         rel_root = root_path.relative_to(base)
         depth = 0 if str(rel_root) == "." else len(rel_root.parts)
+        if max_depth is not None and depth >= max_depth:
+            dirs[:] = []
         for name in names:
             scanned += 1
             if include_pattern and not fnmatch.fnmatch(name, include_pattern):
+                continue
+            if max_depth is not None and depth > max_depth:
                 continue
             file_path = root_path / name
             rel = file_path.relative_to(REPO_ROOT)
@@ -179,8 +183,6 @@ def tool_list_files(
             files.append(rel_str)
             if limit is not None and len(files) >= limit:
                 break
-        if max_depth is not None and depth >= max_depth:
-            dirs[:] = []
         if limit is not None and len(files) >= limit:
             break
 

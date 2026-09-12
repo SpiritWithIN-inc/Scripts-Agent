@@ -57,8 +57,12 @@ def iter_old_logs(
         root_path = Path(root)
         rel_root = root_path.relative_to(log_dir)
         depth = 0 if str(rel_root) == "." else len(rel_root.parts)
+        if max_depth is not None and depth >= max_depth:
+            dirs[:] = []
         for name in names:
             if not fnmatch.fnmatch(name, include_pattern):
+                continue
+            if max_depth is not None and depth > max_depth:
                 continue
             p = root_path / name
             scanned += 1
@@ -70,8 +74,6 @@ def iter_old_logs(
                 yield p
                 if limit is not None and matched >= limit:
                     break
-        if max_depth is not None and depth >= max_depth:
-            dirs[:] = []
         if limit is not None and matched >= limit:
             break
     elapsed_ms = (time.perf_counter() - start) * 1000

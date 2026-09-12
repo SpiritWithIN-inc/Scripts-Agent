@@ -56,6 +56,7 @@ def _build_session() -> requests.Session:
         backoff_factor=1.0,
         status_forcelist=(429, 500, 502, 503, 504),
         allowed_methods=("GET",),
+        respect_retry_after_header=True,
     )
     adapter = HTTPAdapter(max_retries=retry)
     session = requests.Session()

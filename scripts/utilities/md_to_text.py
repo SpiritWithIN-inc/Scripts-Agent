@@ -103,8 +103,12 @@ def iter_markdown_files(
         root_path = Path(root)
         rel_root = root_path.relative_to(input_dir)
         depth = 0 if str(rel_root) == "." else len(rel_root.parts)
+        if max_depth is not None and depth >= max_depth:
+            dirs[:] = []
         for name in names:
             if not fnmatch.fnmatch(name, include_pattern):
+                continue
+            if max_depth is not None and depth > max_depth:
                 continue
             path = root_path / name
             rel_str = str(path.relative_to(input_dir))
@@ -114,8 +118,6 @@ def iter_markdown_files(
             yielded += 1
             if limit is not None and yielded >= limit:
                 break
-        if max_depth is not None and depth >= max_depth:
-            dirs[:] = []
         if limit is not None and yielded >= limit:
             break
     elapsed_ms = (time.perf_counter() - start) * 1000
