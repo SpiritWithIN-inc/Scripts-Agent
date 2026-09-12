@@ -35,7 +35,7 @@ ISSUES_FIELDS = ["number", "title", "state", "created_at", "updated_at", "html_u
 def _headers(token: str | None) -> dict[str, str]:
     h = {"Accept": "application/vnd.github+json"}
     if token:
-        h["Authorization"] = f"token {token}"
+        h["Authorization"] = f"******"
     return h
 
 

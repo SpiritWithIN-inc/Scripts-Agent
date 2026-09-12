@@ -16,20 +16,29 @@ Usage
 from __future__ import annotations
 
 import os
-from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from scripts.common.logger import get_logger
 
 log = get_logger(__name__)
-_DOTENV_SUCCESS_MARKERS: dict[str, float] = {}
-_DOTENV_FAILED_MARKERS: dict[str, float | None] = {}
-_DOTENV_UNAVAILABLE = False
+_LOAD_DOTENV: Callable[..., bool] | None | bool = None
 
 
-def _dotenv_marker(dotenv_path: str | None) -> float | None:
-    path = Path(dotenv_path) if dotenv_path else Path(".env")
-    return path.stat().st_mtime if path.exists() else None
+def _get_load_dotenv() -> Callable[..., bool] | None:
+    """Return cached dotenv loader or None when python-dotenv is unavailable."""
+    global _LOAD_DOTENV
+    if _LOAD_DOTENV is False:
+        return None
+    if _LOAD_DOTENV is None:
+        try:
+            from dotenv import load_dotenv  # type: ignore[import-untyped]
+
+            _LOAD_DOTENV = load_dotenv
+        except ImportError:
+            _LOAD_DOTENV = False
+            log.debug("python-dotenv not installed; skipping .env loading.")
+            return None
+    return _LOAD_DOTENV
 
 
 def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
@@ -49,40 +58,16 @@ def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
     dict
         A snapshot of the current environment variables.
     """
-    global _DOTENV_UNAVAILABLE
-    cache_key = dotenv_path or "__auto__"
-    marker = _dotenv_marker(dotenv_path)
-
-    if marker is not None and _DOTENV_SUCCESS_MARKERS.get(cache_key) == marker:
-        return dict(os.environ)
-    if marker is not None and _DOTENV_FAILED_MARKERS.get(cache_key) == marker:
-        return dict(os.environ)
-
-    if not _DOTENV_UNAVAILABLE:
-        try:
-            from dotenv import load_dotenv  # type: ignore[import-untyped]
-
-            loaded = False
-            if dotenv_path:
-                loaded = load_dotenv(dotenv_path, override=False)
-                if loaded:
-                    log.debug("Loaded .env from '%s'.", dotenv_path)
-            else:
-                loaded = load_dotenv(override=False)
-                if loaded:
-                    log.debug("Loaded .env from current directory.")
-
+    load_dotenv = _get_load_dotenv()
+    if load_dotenv is not None:
+        if dotenv_path:
+            loaded = load_dotenv(dotenv_path, override=False)
             if loaded:
-                if marker is not None:
-                    _DOTENV_SUCCESS_MARKERS[cache_key] = marker
-                _DOTENV_FAILED_MARKERS.pop(cache_key, None)
-            else:
-                _DOTENV_SUCCESS_MARKERS.pop(cache_key, None)
-                if marker is not None:
-                    _DOTENV_FAILED_MARKERS[cache_key] = marker
-        except ImportError:
-            _DOTENV_UNAVAILABLE = True
-            log.debug("python-dotenv not installed; skipping .env loading.")
+                log.debug("Loaded .env from '%s'.", dotenv_path)
+        else:
+            loaded = load_dotenv(override=False)
+            if loaded:
+                log.debug("Loaded .env from current directory.")
 
     return dict(os.environ)
 
