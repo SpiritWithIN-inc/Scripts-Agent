@@ -165,8 +165,19 @@ class ReviewAgent:
         return "".join(chunks)
 
     def _iter_allowed_files(self, directory: Path) -> list[Path]:
-        return [
-            p
-            for p in sorted(directory.rglob("*"))
-            if p.is_file() and p.suffix.lower() in ALLOWED_FILE_SUFFIXES
-        ]
+        root = REPO_ROOT.resolve()
+        allowed: list[Path] = []
+        for path in sorted(directory.rglob("*")):
+            if not path.is_file() or path.suffix.lower() not in ALLOWED_FILE_SUFFIXES:
+                continue
+            resolved = path.resolve()
+            try:
+                resolved.relative_to(root)
+            except ValueError:
+                log.warning(
+                    "Skipping file outside repository discovered via directory target: %s",
+                    resolved,
+                )
+                continue
+            allowed.append(resolved)
+        return allowed
