@@ -38,6 +38,7 @@ except ImportError:  # pragma: no cover
 
 from scripts.common.logger import get_logger
 from scripts.common.file_ops import safe_write, safe_read
+from agent.review_agent import ReviewAgent
 
 log = get_logger(__name__)
 
@@ -338,6 +339,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="List existing scripts and exit.",
     )
+    parser.add_argument(
+        "--review",
+        action="store_true",
+        default=False,
+        help="Run the advanced review agent instead of script generation.",
+    )
+    parser.add_argument(
+        "--review-target",
+        action="append",
+        default=[],
+        help=(
+            "File or directory to review. Repeat for multiple targets. "
+            "Defaults to core repository code when omitted."
+        ),
+    )
+    parser.add_argument(
+        "--review-model",
+        default="gpt-4o",
+        help="OpenAI model to use for --review mode (default: gpt-4o).",
+    )
     return parser
 
 
@@ -351,6 +372,13 @@ def main(argv: list[str] | None = None) -> int:
             print("\n".join(files))
         else:
             print("No scripts found.")
+        return 0
+
+    if args.review:
+        review_agent = ReviewAgent(model=args.review_model)
+        prompt = args.task.strip() if args.task else "Perform a full system review."
+        report = review_agent.review(prompt, targets=args.review_target)
+        print(report)
         return 0
 
     if not args.task:

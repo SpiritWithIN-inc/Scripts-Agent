@@ -14,12 +14,14 @@ Copilot Agent is a personal AI‑driven script factory that turns natural langua
 - **Proactive Assistance** — the agent suggests reusable helpers, refactors, and companion scripts
 - **Safe Defaults** — dry-run mode by default; all writes scoped to `/scripts`
 - **Extensible Agent Loop** — modular Python orchestration with LLM-backed planning
+- **Advanced Review Agent** — deep, high-capability repository reviews with security, reliability, and architecture findings
 
 ## Project Structure
 
 ```
 /agent
     agent/coding_agent.py        # core agent loop and tool wrappers
+    agent/review_agent.py        # advanced review agent for deep code/system analysis
 /scripts
     /system_automation           # OS-level tasks, log archiving, file management
     /data_processing             # CSV/JSON ETL, reporting, normalization
@@ -63,6 +65,18 @@ python main.py "Archive logs older than 30 days and upload them to a backup fold
 
 ```bash
 python main.py --auto-apply "Archive logs older than 30 days and upload them to a backup folder"
+```
+
+### Run advanced review mode
+
+```bash
+python main.py --review "Perform a full architecture, security, and reliability review"
+```
+
+### Run review mode on specific targets
+
+```bash
+python main.py --review --review-target agent --review-target scripts "Focus on correctness and high-severity risks"
 ```
 
 ## Example Tasks
