@@ -22,11 +22,14 @@ Safe defaults
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import logging
 import os
 import subprocess
 import sys
+import time
+import tracemalloc
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +43,9 @@ from scripts.common.logger import get_logger
 from scripts.common.file_ops import safe_write, safe_read
 
 log = get_logger(__name__)
+
+if not tracemalloc.is_tracing():
+    tracemalloc.start()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -127,12 +133,66 @@ Script rules:
 # Tool helpers
 # ---------------------------------------------------------------------------
 
-def tool_list_files(directory: str | Path = SCRIPTS_ROOT) -> list[str]:
+def _memory_kib() -> tuple[float, float]:
+    current, peak = tracemalloc.get_traced_memory()
+    return current / 1024.0, peak / 1024.0
+
+
+def tool_list_files(
+    directory: str | Path = SCRIPTS_ROOT,
+    *,
+    include_pattern: str = "*",
+    exclude_pattern: str | None = None,
+    max_depth: int | None = None,
+    limit: int | None = None,
+) -> list[str]:
     """Return a sorted list of files under *directory* relative to REPO_ROOT."""
+    start = time.perf_counter()
     base = Path(directory)
     if not base.exists():
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        current_kib, peak_kib = _memory_kib()
+        log.info(
+            "perf.tool_list_files directory=%s count=0 elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+            base,
+            elapsed_ms,
+            current_kib,
+            peak_kib,
+        )
         return []
-    return sorted(str(p.relative_to(REPO_ROOT)) for p in base.rglob("*") if p.is_file())
+
+    files: list[str] = []
+    scanned = 0
+    for p in base.rglob("*"):
+        if not p.is_file():
+            continue
+        scanned += 1
+        rel = p.relative_to(REPO_ROOT)
+        rel_str = str(rel)
+        depth = len(rel.parts) - 1
+        if max_depth is not None and depth > max_depth:
+            continue
+        if include_pattern and not fnmatch.fnmatch(rel.name, include_pattern):
+            continue
+        if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
+            continue
+        files.append(rel_str)
+        if limit is not None and len(files) >= limit:
+            break
+
+    files.sort()
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    current_kib, peak_kib = _memory_kib()
+    log.info(
+        "perf.tool_list_files directory=%s scanned=%d count=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        base,
+        scanned,
+        len(files),
+        elapsed_ms,
+        current_kib,
+        peak_kib,
+    )
+    return files
 
 
 def tool_read_file(path: str | Path) -> str:
@@ -186,22 +246,39 @@ def _assert_in_scripts(path: Path) -> None:
         )
 
 
-def _call_llm(messages: list[dict[str, str]], model: str = "gpt-4o-mini") -> str:
+def _call_llm(
+    messages: list[dict[str, str]],
+    model: str = "gpt-4o-mini",
+    *,
+    client: Any | None = None,
+) -> str:
     """Call the OpenAI chat API and return the assistant message content."""
-    if not _OPENAI_AVAILABLE:
-        raise RuntimeError(
-            "openai package is not installed. Run: pip install openai"
-        )
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "OPENAI_API_KEY environment variable is not set."
-        )
-    client = OpenAI(api_key=api_key)
+    start = time.perf_counter()
+    if client is None:
+        if not _OPENAI_AVAILABLE:
+            raise RuntimeError(
+                "openai package is not installed. Run: pip install openai"
+            )
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY environment variable is not set."
+            )
+        client = OpenAI(api_key=api_key)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=0.2,
+    )
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    current_kib, peak_kib = _memory_kib()
+    log.info(
+        "perf._call_llm model=%s messages=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        model,
+        len(messages),
+        elapsed_ms,
+        current_kib,
+        peak_kib,
     )
     return response.choices[0].message.content
 
@@ -234,6 +311,7 @@ class CodingAgent:
     ) -> None:
         self.dry_run = dry_run and not auto_apply
         self.model = model
+        self._openai_client: Any | None = None
         log.info(
             "CodingAgent initialized (dry_run=%s, model=%s)",
             self.dry_run,
@@ -278,14 +356,26 @@ class CodingAgent:
     # ------------------------------------------------------------------
 
     def _plan(self, task: str) -> list[dict[str, Any]]:
+        start = time.perf_counter()
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": task},
         ]
-        raw = _call_llm(messages, model=self.model)
-        return _parse_plan(raw)
+        raw = _call_llm(messages, model=self.model, client=self._get_openai_client())
+        plan = _parse_plan(raw)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        current_kib, peak_kib = _memory_kib()
+        log.info(
+            "perf._plan scripts=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+            len(plan),
+            elapsed_ms,
+            current_kib,
+            peak_kib,
+        )
+        return plan
 
     def _apply_entry(self, entry: dict[str, Any]) -> Path | None:
+        start = time.perf_counter()
         category = entry.get("category", "utilities")
         filename = entry.get("filename", "script.py")
         body = entry.get("body", "")
@@ -297,7 +387,33 @@ class CodingAgent:
         dest = CATEGORIES[category] / filename
         result = tool_write_file(dest, body, dry_run=self.dry_run)
         log.info(result)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        current_kib, peak_kib = _memory_kib()
+        log.info(
+            "perf._apply_entry category=%s filename=%s bytes=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+            category,
+            filename,
+            len(body),
+            elapsed_ms,
+            current_kib,
+            peak_kib,
+        )
         return None if self.dry_run else dest
+
+    def _get_openai_client(self) -> Any:
+        if self._openai_client is not None:
+            return self._openai_client
+        if not _OPENAI_AVAILABLE:
+            raise RuntimeError(
+                "openai package is not installed. Run: pip install openai"
+            )
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY environment variable is not set."
+            )
+        self._openai_client = OpenAI(api_key=api_key)
+        return self._openai_client
 
     def _recommend_git_snapshot(self) -> None:
         log.info(
@@ -338,6 +454,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="List existing scripts and exit.",
     )
+    parser.add_argument(
+        "--list-include",
+        default="*",
+        help="File name pattern for --list-files filtering.",
+    )
+    parser.add_argument(
+        "--list-exclude",
+        default=None,
+        help="Optional relative path glob pattern to exclude in --list-files.",
+    )
+    parser.add_argument(
+        "--list-max-depth",
+        type=int,
+        default=None,
+        help="Maximum relative depth for --list-files.",
+    )
+    parser.add_argument(
+        "--list-limit",
+        type=int,
+        default=None,
+        help="Maximum number of files returned by --list-files.",
+    )
     return parser
 
 
@@ -346,7 +484,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.list_files:
-        files = tool_list_files()
+        files = tool_list_files(
+            include_pattern=args.list_include,
+            exclude_pattern=args.list_exclude,
+            max_depth=args.list_max_depth,
+            limit=args.list_limit,
+        )
         if files:
             print("\n".join(files))
         else:

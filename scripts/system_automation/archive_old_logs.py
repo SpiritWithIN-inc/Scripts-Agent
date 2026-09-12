@@ -9,10 +9,14 @@ structured logging, and tqdm progress bars.
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import shutil
 import sys
+import time
+import tracemalloc
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Iterable, Iterator
 
 # Ensure the repository root is on sys.path when this script is run directly.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -25,23 +29,66 @@ from scripts.common.logger import get_logger
 
 log = get_logger(__name__)
 
+if not tracemalloc.is_tracing():
+    tracemalloc.start()
 
-def find_old_logs(log_dir: Path, days: int) -> list[Path]:
-    """Return log files in *log_dir* older than *days* days."""
+
+def _memory_kib() -> tuple[float, float]:
+    current, peak = tracemalloc.get_traced_memory()
+    return current / 1024.0, peak / 1024.0
+
+
+def iter_old_logs(
+    log_dir: Path,
+    days: int,
+    *,
+    include_pattern: str = "*.log",
+    exclude_pattern: str | None = None,
+    max_depth: int | None = None,
+    limit: int | None = None,
+) -> Iterator[Path]:
+    """Yield log files in *log_dir* older than *days* days."""
+    start = time.perf_counter()
     cutoff = datetime.now() - timedelta(days=days)
-    return [
-        p for p in log_dir.rglob("*.log")
-        if datetime.fromtimestamp(p.stat().st_mtime) < cutoff
-    ]
+    matched = 0
+    scanned = 0
+    for p in log_dir.rglob(include_pattern):
+        if not p.is_file():
+            continue
+        scanned += 1
+        rel = p.relative_to(log_dir)
+        depth = len(rel.parts) - 1
+        if max_depth is not None and depth > max_depth:
+            continue
+        rel_str = str(rel)
+        if exclude_pattern and fnmatch.fnmatch(rel_str, exclude_pattern):
+            continue
+        if datetime.fromtimestamp(p.stat().st_mtime) < cutoff:
+            matched += 1
+            yield p
+            if limit is not None and matched >= limit:
+                break
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    current_kib, peak_kib = _memory_kib()
+    log.info(
+        "perf.iter_old_logs root=%s scanned=%d matched=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        log_dir,
+        scanned,
+        matched,
+        elapsed_ms,
+        current_kib,
+        peak_kib,
+    )
 
 
 def archive_logs(
-    files: list[Path],
+    files: Iterable[Path],
     backup_dir: Path,
     *,
     dry_run: bool,
 ) -> int:
     """Copy *files* to *backup_dir*.  Returns the number of files archived."""
+    start = time.perf_counter()
     archived = 0
     for src in tqdm(files, desc="Archiving logs", unit="file"):
         dest = backup_dir / src.name
@@ -52,6 +99,15 @@ def archive_logs(
             shutil.copy2(src, dest)
             log.info("Archived '%s' → '%s'.", src, dest)
         archived += 1
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    current_kib, peak_kib = _memory_kib()
+    log.info(
+        "perf.archive_logs archived=%d elapsed_ms=%.2f mem_current_kib=%.2f mem_peak_kib=%.2f",
+        archived,
+        elapsed_ms,
+        current_kib,
+        peak_kib,
+    )
     return archived
 
 
@@ -68,15 +124,23 @@ def main(args: argparse.Namespace) -> int:
         log.error("Log directory '%s' does not exist.", log_dir)
         return 1
 
-    old_files = find_old_logs(log_dir, args.days)
-    log.info("Found %d log file(s) older than %d day(s).", len(old_files), args.days)
-
-    if not old_files:
+    backup_dir = Path(args.backup_dir)
+    count = archive_logs(
+        iter_old_logs(
+            log_dir,
+            args.days,
+            include_pattern=args.include,
+            exclude_pattern=args.exclude,
+            max_depth=args.max_depth,
+            limit=args.limit,
+        ),
+        backup_dir,
+        dry_run=args.dry_run,
+    )
+    log.info("Found %d log file(s) older than %d day(s).", count, args.days)
+    if count == 0:
         log.info("Nothing to archive.")
         return 0
-
-    backup_dir = Path(args.backup_dir)
-    count = archive_logs(old_files, backup_dir, dry_run=args.dry_run)
     log.info("Archived %d file(s).", count)
     return 0
 
@@ -88,6 +152,28 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--log-dir", default="/var/log", help="Directory to scan.")
     parser.add_argument("--backup-dir", default="/var/log/archive", help="Backup destination.")
     parser.add_argument("--days", type=int, default=30, help="Age threshold in days (default: 30).")
+    parser.add_argument(
+        "--include",
+        default="*.log",
+        help="File name pattern to include during scan (default: *.log).",
+    )
+    parser.add_argument(
+        "--exclude",
+        default=None,
+        help="Optional relative path glob pattern to exclude.",
+    )
+    parser.add_argument(
+        "--max-depth",
+        type=int,
+        default=None,
+        help="Maximum scan depth relative to log-dir.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Maximum number of files to archive.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",

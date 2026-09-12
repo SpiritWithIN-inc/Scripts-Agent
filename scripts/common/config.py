@@ -21,9 +21,15 @@ from typing import Any
 from scripts.common.logger import get_logger
 
 log = get_logger(__name__)
+_config_cache: dict[str, Any] | None = None
+_config_cache_dotenv_path: str | None = None
 
 
-def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
+def load_config(
+    dotenv_path: str | None = None,
+    *,
+    use_cache: bool = True,
+) -> dict[str, Any]:
     """Load configuration from environment variables.
 
     If ``python-dotenv`` is installed and a ``.env`` file exists, it is
@@ -40,6 +46,10 @@ def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
     dict
         A snapshot of the current environment variables.
     """
+    global _config_cache, _config_cache_dotenv_path
+    if use_cache and _config_cache is not None and _config_cache_dotenv_path == dotenv_path:
+        return dict(_config_cache)
+
     try:
         from dotenv import load_dotenv  # type: ignore[import-untyped]
 
@@ -53,7 +63,11 @@ def load_config(dotenv_path: str | None = None) -> dict[str, Any]:
     except ImportError:
         log.debug("python-dotenv not installed; skipping .env loading.")
 
-    return dict(os.environ)
+    snapshot = dict(os.environ)
+    if use_cache:
+        _config_cache = snapshot
+        _config_cache_dotenv_path = dotenv_path
+    return dict(snapshot)
 
 
 def require_env(name: str, default: str | None = None) -> str:
