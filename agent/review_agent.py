@@ -168,6 +168,8 @@ class ReviewAgent:
         root = REPO_ROOT.resolve()
         allowed: list[Path] = []
         for path in sorted(directory.rglob("*")):
+            if path.is_symlink():
+                continue
             if not path.is_file() or path.suffix.lower() not in ALLOWED_FILE_SUFFIXES:
                 continue
             resolved = path.resolve()
