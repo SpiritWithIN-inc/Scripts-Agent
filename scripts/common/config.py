@@ -27,6 +27,21 @@ _config_cache_dotenv_path: str | None = None
 _config_cache_lock = threading.Lock()
 
 
+def _maybe_load_dotenv(dotenv_path: str | None) -> None:
+    try:
+        from dotenv import load_dotenv  # type: ignore[import-untyped]
+
+        if dotenv_path:
+            load_dotenv(dotenv_path, override=False)
+            log.debug("Loaded .env from '%s'.", dotenv_path)
+        else:
+            loaded = load_dotenv(override=False)
+            if loaded:
+                log.debug("Loaded .env from current directory.")
+    except ImportError:
+        log.debug("python-dotenv not installed; skipping .env loading.")
+
+
 def load_config(
     dotenv_path: str | None = None,
     *,
@@ -53,26 +68,14 @@ def load_config(
         with _config_cache_lock:
             if _config_cache is not None and _config_cache_dotenv_path == dotenv_path:
                 return dict(_config_cache)
-
-    try:
-        from dotenv import load_dotenv  # type: ignore[import-untyped]
-
-        if dotenv_path:
-            load_dotenv(dotenv_path, override=False)
-            log.debug("Loaded .env from '%s'.", dotenv_path)
-        else:
-            loaded = load_dotenv(override=False)
-            if loaded:
-                log.debug("Loaded .env from current directory.")
-    except ImportError:
-        log.debug("python-dotenv not installed; skipping .env loading.")
-
-    snapshot = dict(os.environ)
-    if use_cache:
-        with _config_cache_lock:
+            _maybe_load_dotenv(dotenv_path)
+            snapshot = dict(os.environ)
             _config_cache = snapshot
             _config_cache_dotenv_path = dotenv_path
-    return dict(snapshot)
+            return dict(snapshot)
+
+    _maybe_load_dotenv(dotenv_path)
+    return dict(os.environ)
 
 
 def require_env(name: str, default: str | None = None) -> str:
