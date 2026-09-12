@@ -375,8 +375,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.review:
+        if not args.task:
+            parser.error("review mode requires a positional task prompt.")
         review_agent = ReviewAgent(model=args.review_model)
-        prompt = args.task.strip() if args.task else "Perform a full system review."
+        prompt = args.task.strip()
         try:
             report = review_agent.review(prompt, targets=args.review_target)
             print(report)

@@ -37,6 +37,7 @@ DEFAULT_REVIEW_PATHS = (
 MAX_FILE_CHARS = 12000
 MAX_CONTEXT_CHARS = 60000
 ALLOWED_FILE_SUFFIXES = {".py", ".md", ".txt", ".rst"}
+FENCE_LANGUAGE_MAP = {".py": "python", ".md": "markdown", ".rst": "rst", ".txt": "text"}
 
 REVIEW_SYSTEM_PROMPT = """\
 You are an elite software review agent with maximum capabilities.
@@ -108,11 +109,10 @@ class ReviewAgent:
             for entry in DEFAULT_REVIEW_PATHS:
                 if entry.exists():
                     if entry.is_file():
-                        resolved.append(entry)
+                        if entry.suffix.lower() in ALLOWED_FILE_SUFFIXES:
+                            resolved.append(entry)
                     else:
-                        resolved.extend(
-                            p for p in sorted(entry.rglob("*.py")) if p.is_file()
-                        )
+                        resolved.extend(self._iter_allowed_files(entry))
             return resolved
 
         resolved: list[Path] = []
@@ -135,7 +135,7 @@ class ReviewAgent:
                     continue
                 resolved.append(path)
             else:
-                resolved.extend(p for p in sorted(path.rglob("*.py")) if p.is_file())
+                resolved.extend(self._iter_allowed_files(path))
         return resolved
 
     def _build_context(self, files: list[Path]) -> str:
@@ -149,7 +149,10 @@ class ReviewAgent:
             content = safe_read(file)
             if len(content) > MAX_FILE_CHARS:
                 content = content[:MAX_FILE_CHARS] + "\n... [truncated]\n"
-            section = f"\n### FILE: {rel}\n```python\n{content}\n```\n"
+            suffix = file.suffix.lower()
+            language = FENCE_LANGUAGE_MAP.get(suffix, "")
+            fence = f"```{language}" if language else "```"
+            section = f"\n### FILE: {rel}\n{fence}\n{content}\n```\n"
             projected = total + len(section)
             if projected > MAX_CONTEXT_CHARS:
                 chunks.append("\n[Context truncated due to size limits.]\n")
@@ -160,3 +163,10 @@ class ReviewAgent:
         if not chunks:
             return "No readable files were provided for review."
         return "".join(chunks)
+
+    def _iter_allowed_files(self, directory: Path) -> list[Path]:
+        return [
+            p
+            for p in sorted(directory.rglob("*"))
+            if p.is_file() and p.suffix.lower() in ALLOWED_FILE_SUFFIXES
+        ]
