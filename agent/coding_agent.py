@@ -152,10 +152,10 @@ def tool_list_files(
         if not path.is_file():
             continue
         files.append(str(path.relative_to(REPO_ROOT)))
+        if limit is not None and len(files) >= limit:
+            break
 
     files.sort()
-    if limit is not None:
-        files = files[:limit]
     _log_perf("tool_list_files", started_at, files=len(files), limit=limit)
     return files
 
