@@ -167,14 +167,19 @@ def stream_issues_to_csv(
                         headers=headers,
                         params={"state": state, "per_page": per_page, "page": page},
                     )
-                    issues = resp.json()
-                    _log_perf("fetch_page", fetch_started_at, page=page, issues=len(issues))
+                    page_items = resp.json()
+                    issues = [item for item in page_items if "pull_request" not in item]
+                    _log_perf(
+                        "fetch_page",
+                        fetch_started_at,
+                        page=page,
+                        items=len(page_items),
+                        issues=len(issues),
+                    )
                     if not issues:
                         break
 
                     for issue in issues:
-                        if "pull_request" in issue:
-                            continue
                         if writer is not None:
                             writer.writerow(issue_to_row(issue))
                         total_issues += 1

@@ -75,6 +75,7 @@ def find_old_logs(
 
 def archive_logs(
     files: Iterator[Path],
+    log_dir: Path,
     backup_dir: Path,
     *,
     dry_run: bool,
@@ -83,12 +84,16 @@ def archive_logs(
     started_at = time.perf_counter()
     archived = 0
     for src in tqdm(files, desc="Archiving logs", unit="file"):
-        dest = backup_dir / src.name
+        try:
+            relative = src.relative_to(log_dir)
+        except ValueError:
+            relative = Path(src.name)
+        dest = backup_dir / relative
         if dry_run:
             if log.isEnabledFor(10):
                 log.debug("[dry-run] Would archive '%s' → '%s'.", src, dest)
         else:
-            backup_dir.mkdir(parents=True, exist_ok=True)
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
             if log.isEnabledFor(10):
                 log.debug("Archived '%s' → '%s'.", src, dest)
@@ -119,7 +124,7 @@ def main(args: argparse.Namespace) -> int:
     )
 
     backup_dir = Path(args.backup_dir)
-    count = archive_logs(old_files, backup_dir, dry_run=args.dry_run)
+    count = archive_logs(old_files, log_dir, backup_dir, dry_run=args.dry_run)
     if count == 0:
         log.info("Nothing to archive.")
         return 0
