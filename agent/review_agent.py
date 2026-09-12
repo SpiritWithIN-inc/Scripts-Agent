@@ -36,6 +36,7 @@ DEFAULT_REVIEW_PATHS = (
 
 MAX_FILE_CHARS = 12000
 MAX_CONTEXT_CHARS = 60000
+ALLOWED_FILE_SUFFIXES = {".py", ".md", ".txt", ".rst"}
 
 REVIEW_SYSTEM_PROMPT = """\
 You are an elite software review agent with maximum capabilities.
@@ -101,6 +102,7 @@ class ReviewAgent:
         return _call_llm(messages, model=self.model).strip()
 
     def _resolve_targets(self, targets: list[str] | None) -> list[Path]:
+        root = REPO_ROOT.resolve()
         if not targets:
             resolved = []
             for entry in DEFAULT_REVIEW_PATHS:
@@ -122,7 +124,15 @@ class ReviewAgent:
             if not path.exists():
                 log.warning("Review target does not exist: %s", path)
                 continue
+            try:
+                path.relative_to(root)
+            except ValueError:
+                log.warning("Review target is outside repository and was skipped: %s", path)
+                continue
             if path.is_file():
+                if path.suffix.lower() not in ALLOWED_FILE_SUFFIXES:
+                    log.warning("Review target file type is not allowed and was skipped: %s", path)
+                    continue
                 resolved.append(path)
             else:
                 resolved.extend(p for p in sorted(path.rglob("*.py")) if p.is_file())

@@ -377,9 +377,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.review:
         review_agent = ReviewAgent(model=args.review_model)
         prompt = args.task.strip() if args.task else "Perform a full system review."
-        report = review_agent.review(prompt, targets=args.review_target)
-        print(report)
-        return 0
+        try:
+            report = review_agent.review(prompt, targets=args.review_target)
+            print(report)
+            return 0
+        except Exception as exc:
+            log.error("Review mode failed: %s", exc)
+            return 1
 
     if not args.task:
         parser.print_help()

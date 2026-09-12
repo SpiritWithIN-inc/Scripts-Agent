@@ -69,11 +69,15 @@ python main.py --auto-apply "Archive logs older than 30 days and upload them to 
 
 ### Run advanced review mode
 
+The review request is passed as the same positional `task` argument used by generation mode.
+
 ```bash
 python main.py --review "Perform a full architecture, security, and reliability review"
 ```
 
 ### Run review mode on specific targets
+
+`--review-target` can be repeated, and the final quoted string remains the positional review request.
 
 ```bash
 python main.py --review --review-target agent --review-target scripts "Focus on correctness and high-severity risks"
