@@ -167,19 +167,24 @@ class ReviewAgent:
     def _iter_allowed_files(self, directory: Path) -> list[Path]:
         root = REPO_ROOT.resolve()
         allowed: list[Path] = []
-        for path in sorted(directory.rglob("*")):
-            if path.is_symlink():
-                continue
-            if not path.is_file() or path.suffix.lower() not in ALLOWED_FILE_SUFFIXES:
-                continue
-            resolved = path.resolve()
-            try:
-                resolved.relative_to(root)
-            except ValueError:
-                log.warning(
-                    "Skipping file outside repository discovered via directory target: %s",
-                    resolved,
-                )
-                continue
-            allowed.append(resolved)
+        for base, dir_names, file_names in os.walk(directory, followlinks=False):
+            base_path = Path(base)
+            dir_names[:] = [
+                name for name in dir_names if not (base_path / name).is_symlink()
+            ]
+            for file_name in file_names:
+                path = (base_path / file_name)
+                if path.is_symlink() or path.suffix.lower() not in ALLOWED_FILE_SUFFIXES:
+                    continue
+                resolved = path.resolve()
+                try:
+                    resolved.relative_to(root)
+                except ValueError:
+                    log.warning(
+                        "Skipping file outside repository discovered via directory target: %s",
+                        resolved,
+                    )
+                    continue
+                allowed.append(resolved)
+        allowed.sort()
         return allowed
